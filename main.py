@@ -53,7 +53,7 @@ async def main():
             "Backend .NET Engineer",
             "Software Engineer .NET",
         ],
-        experience_filter="3",       # LinkedIn: 2 = Mid-Senior
+        # experience_filter="3",       # LinkedIn: 2 = Mid-Senior
         job_type="remote",
         easy_apply_only=True,
         max_jobs_per_session=25,     # Safe daily limit to avoid flagging

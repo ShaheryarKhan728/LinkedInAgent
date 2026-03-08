@@ -19,9 +19,9 @@ class AgentConfig:
     resume_path: str
 
     # Search parameters
-    target_locations: List[str] = field(default_factory=lambda: ["Europe", "Singapore", "United States"])
+    target_locations: List[str] = field(default_factory=lambda: ["United States"])
     search_keywords: List[str] = field(default_factory=lambda: [".NET Developer"])
-    experience_filter: str = "2"   # LinkedIn experience level code
+    # experience_filter: str = "2"   # LinkedIn experience level code
     job_type: str = "remote"
     easy_apply_only: bool = True
 

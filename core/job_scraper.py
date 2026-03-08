@@ -165,12 +165,30 @@ class LinkedInJobScraper:
         try:
             await self.page.goto(job.url, wait_until="domcontentloaded", timeout=20000)
             await self._random_delay(2, 4)
-
-            desc_el = await self.page.query_selector(".jobs-description__content")
-            if not desc_el:
-                desc_el = await self.page.query_selector(".job-view-layout")
-            if desc_el:
-                return (await desc_el.inner_text()).strip()
+            return await self.fetch_job_description_from_current_page()
         except Exception as e:
             logger.debug(f"JD fetch error for {job.job_id}: {e}")
+        return ""
+
+    async def fetch_job_description_from_current_page(self) -> str:
+        """
+        Extract job description from whatever page is currently loaded.
+        Called by agent.py after it has already navigated — avoids double navigation.
+        """
+        try:
+            for sel in [
+                ".jobs-description__content",
+                ".jobs-description-content__text",
+                "#job-details",
+                ".jobs-box__html-content",
+                ".job-view-layout",
+                "[class*='description']",
+            ]:
+                el = await self.page.query_selector(sel)
+                if el:
+                    text = (await el.inner_text()).strip()
+                    if text:
+                        return text
+        except Exception as e:
+            logger.debug(f"JD extraction error: {e}")
         return ""
