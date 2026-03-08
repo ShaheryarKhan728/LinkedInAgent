@@ -1,6 +1,4 @@
 # LinkedIn Job Application Agent
-### For Shaheryar Khan — .NET Developer Remote Jobs (EU / SG / US)
-
 ---
 
 ## ⚙️ SETUP (One-time, 5 minutes)
