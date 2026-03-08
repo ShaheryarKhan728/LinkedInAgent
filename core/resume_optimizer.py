@@ -104,9 +104,14 @@ Cloud & DevOps: Microsoft Azure (AZ-900), Jenkins CI/CD, GitHub, GitLab, Git, Po
 
 
 class ResumeOptimizer:
-    def __init__(self, output_dir: str = "resumes/tailored"):
+    def __init__(self, output_dir: str = "resumes/tailored", gemini_service=None):
         self.output_dir = output_dir
+        self.gemini_service = gemini_service
         os.makedirs(output_dir, exist_ok=True)
+        if gemini_service:
+            logger.info(f"✓ ResumeOptimizer initialized with Gemini service")
+        else:
+            logger.info(f"✓ ResumeOptimizer initialized (regex-based mode)")
 
     def extract_keywords_from_jd(self, job_title: str, job_description: str) -> Dict[str, List[str]]:
         """Extract relevant keywords from job description that match candidate skills."""
@@ -201,3 +206,93 @@ emailshaheryar@gmail.com | +923113206213
 linkedin.com/in/shaheryarkhan28
 """
         return cover_letter
+    
+    # ───────────────────────────────────────────────────────────────────────
+    # Async Gemini-powered methods
+    # ───────────────────────────────────────────────────────────────────────
+    async def create_tailored_resume_gemini(self, job_id: str, job_title: str,
+                                           company: str, job_description: str,
+                                           base_resume_text: str,
+                                           optimization_level: str = "light") -> Tuple[str, str]:
+        """
+        Create Gemini-tailored resume with both text and PDF output.
+        
+        Args:
+            job_id, job_title, company, job_description: Job details
+            base_resume_text: The base resume text to tailor
+            optimization_level: "light" (keywords only) or "medium" (reorder + keywords)
+        
+        Returns:
+            (filepath_to_text_file, tailored_resume_text)
+        """
+        try:
+            logger.debug(f"🔄 Calling Gemini to tailor resume...")
+            
+            # Call Gemini to tailor the resume
+            result = await self.gemini_service.generate_tailored_resume(
+                base_resume_text, job_description, job_title, company,
+                optimization_level=optimization_level
+            )
+            
+            tailored_resume = result.get("resume", base_resume_text)
+            logger.info(f"✅ Gemini-tailored resume generated ({len(tailored_resume)} chars)")
+            
+            # Save tailored resume text
+            safe_company = re.sub(r'[^\w]', '_', company)[:30]
+            filename = f"ShaheryarKhan_{safe_company}_{job_id}_GEMINI.txt"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(tailored_resume)
+            
+            logger.info(f"✅ Saved: {filename}")
+            logger.debug(f"   Length: {len(tailored_resume)} chars")
+            
+            return filepath, tailored_resume
+        
+        except Exception as e:
+            logger.error(f"❌ Gemini resume tailoring failed: {e}")
+            logger.debug(f"   Falling back to regex-based resume")
+            return self.create_tailored_resume_text(job_id, job_title, company, job_description)
+    
+    async def generate_cover_letter_gemini(self, job_title: str, company: str,
+                                          job_description: str) -> str:
+        """
+        Generate Gemini-tailored cover letter.
+        
+        Args:
+            job_title, company, job_description: Job details
+        
+        Returns:
+            Cover letter text (200-250 words)
+        """
+        try:
+            logger.debug(f"🔄 Calling Gemini to generate cover letter...")
+            
+            candidate_info = {
+                "name": "Shaheryar Khan",
+                "email": "emailshaheryar@gmail.com",
+                "phone": "+923113206213",
+                "years_exp": "3",
+                "current_company": "Pakistan Single Window",
+                "current_title": "Software Engineer",
+            }
+            
+            result = await self.gemini_service.generate_cover_letter(
+                job_title, company, job_description, candidate_info
+            )
+            
+            cover_letter = result.get("cover_letter", "")
+            if not cover_letter:
+                logger.warning(f"⚠️  Gemini returned empty cover letter")
+                return self.generate_cover_letter(job_title, company, job_description)
+            
+            logger.info(f"✅ Gemini cover letter generated ({len(cover_letter)} chars)")
+            logger.debug(f"   Approximately {len(cover_letter) // 5} words")
+            
+            return cover_letter
+        
+        except Exception as e:
+            logger.error(f"❌ Gemini cover letter generation failed: {e}")
+            logger.debug(f"   Falling back to template-based cover letter")
+            return self.generate_cover_letter(job_title, company, job_description)

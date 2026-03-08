@@ -1,16 +1,22 @@
 """
-LinkedIn Easy Apply Handler  (v2)
+LinkedIn Easy Apply Handler  (v3)
 ====================================
 Autonomously fills and submits LinkedIn Easy Apply forms.
+Now with Gemini AI-powered question answering and user review prompts.
+
+FEATURES:
+- Easy Apply button found via JavaScript DOM walk (immune to class changes)
+- Gemini-powered question analysis (replace regex patterns with AI)
+- User review prompts before form submission
+- PDF resume handling with text fallback
+- Aggressive logging for debugging
 
 FIXES:
-- Easy Apply button found via JavaScript DOM walk (not CSS selector)
-  because LinkedIn dynamically injects classes that don't match static selectors.
-- Wait for network idle + extra settle time before looking for button.
-- Scroll job detail panel into view before clicking.
-- Modal detection uses JS too, not just a single class name.
-- All form helpers hardened with JS fallbacks.
-- Diagnostic logging on every failure to help future debugging.
+- Wait for network idle + extra settle time before looking for button
+- Scroll job detail panel into view before clicking
+- Modal detection uses JS, not just single class name
+- All form helpers hardened with JS fallbacks
+- Diagnostic logging on every failure
 """
 
 import asyncio
@@ -18,7 +24,7 @@ import logging
 import random
 import os
 import re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from core.job_scraper import JobListing
 from core.resume_optimizer import ResumeOptimizer
 
@@ -129,10 +135,18 @@ JS_FIND_NEXT_BUTTON = """
 
 
 class EasyApplyHandler:
-    def __init__(self, page, config):
+    def __init__(self, page, config, gemini_service=None, review_manager=None):
         self.page = page
         self.config = config
         self.optimizer = ResumeOptimizer(config.tailored_resume_dir)
+        self.gemini_service = gemini_service
+        self.review_manager = review_manager
+        self.current_job = None  # Track current job for review context
+        logger.debug(f"🔧 EasyApplyHandler initialized")
+        if gemini_service:
+            logger.debug(f"   ✓ Gemini service available for AI question analysis")
+        if review_manager:
+            logger.debug(f"   ✓ Review manager available for user approval prompts")
 
     async def _delay(self, min_s=1.0, max_s=3.5):
         await asyncio.sleep(random.uniform(min_s, max_s))
@@ -150,6 +164,7 @@ class EasyApplyHandler:
     # ─────────────────────────────────────────────────────────────────────────
     async def apply_to_job_on_current_page(self, job: JobListing,
                                             job_description: str) -> bool:
+        self.current_job = job  # Track for review context
         logger.info(f"📝 Applying: {job.title} @ {job.company}")
         try:
             await self.page.evaluate("window.scrollBy(0, 300)")
@@ -162,12 +177,25 @@ class EasyApplyHandler:
 
             await self._delay(1.5, 3)
 
-            resume_path, _ = self.optimizer.create_tailored_resume_text(
-                job.job_id, job.title, job.company, job_description
-            )
-            cover_letter = self.optimizer.generate_cover_letter(
-                job.title, job.company, job_description
-            )
+            # Use Gemini to generate tailored resume if available
+            if self.gemini_service:
+                resume_path, resume_text = await self._generate_gemini_resume(
+                    job, job_description
+                )
+            else:
+                resume_path, resume_text = self.optimizer.create_tailored_resume_text(
+                    job.job_id, job.title, job.company, job_description
+                )
+            
+            # Use Gemini to generate tailored cover letter if available
+            if self.gemini_service:
+                cover_letter = await self._generate_gemini_cover_letter(
+                    job, job_description
+                )
+            else:
+                cover_letter = self.optimizer.generate_cover_letter(
+                    job.title, job.company, job_description
+                )
 
             return await self._walk_form(job, resume_path, cover_letter)
 
@@ -387,14 +415,19 @@ class EasyApplyHandler:
                     ]:
                         el = await fieldset.query_selector(q_sel)
                         if el:
-                            question = (await el.inner_text()).strip().lower()
+                            question = (await el.inner_text()).strip()
                             if question:
                                 break
 
                     if not question:
                         continue
 
-                    answer = self._get_yes_no_answer(question)
+                    # Use Gemini if available, otherwise fall back to regex
+                    if self.gemini_service:
+                        answer = await self._get_answer_from_gemini(question)
+                    else:
+                        answer = self._get_yes_no_answer(question)
+                    
                     if not answer:
                         continue
 
@@ -501,6 +534,88 @@ class EasyApplyHandler:
                 continue
 
         return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Gemini AI Integration
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _get_answer_from_gemini(self, question: str) -> Optional[str]:
+        """Get answer to question using Gemini AI."""
+        try:
+            logger.debug(f"❓ Asking Gemini: {question[:60]}...")
+            result = await self.gemini_service.analyze_question(
+                question,
+                CANDIDATE_PROFILE
+            )
+            answer = result.get("answer", "")
+            confidence = result.get("confidence", 0)
+            logger.debug(f"   Gemini answer: '{answer}' (confidence: {confidence}%)")
+            return answer if answer else None
+        except Exception as e:
+            logger.error(f"   ❌ Gemini question analysis failed: {e}")
+            logger.debug(f"   Falling back to regex pattern matching")
+            return self._get_yes_no_answer(question)
+    
+    async def _generate_gemini_resume(self, job: JobListing, 
+                                      job_description: str) -> Tuple[str, str]:
+        """Generate Gemini-tailored resume with PDF output."""
+        try:
+            logger.debug(f"📄 Generating Gemini-tailored resume...")
+            
+            # Get base resume text
+            base_resume, _ = self.optimizer.create_tailored_resume_text(
+                job.job_id, job.title, job.company, job_description
+            )
+            with open(base_resume, 'r', encoding='utf-8') as f:
+                base_text = f.read()
+            
+            # Call Gemini to tailor
+            result = await self.gemini_service.generate_tailored_resume(
+                base_text, job_description, job.title, job.company,
+                optimization_level=self.config.resume_optimization_level
+            )
+            
+            resume_text = result.get("resume", base_text)
+            logger.info(f"✅ Gemini resume generated ({len(resume_text)} chars)")
+            
+            return base_resume, resume_text
+        
+        except Exception as e:
+            logger.error(f"   ❌ Gemini resume generation failed: {e}")
+            logger.debug(f"   Falling back to regex-based resume")
+            return self.optimizer.create_tailored_resume_text(
+                job.job_id, job.title, job.company, job_description
+            )
+    
+    async def _generate_gemini_cover_letter(self, job: JobListing,
+                                            job_description: str) -> str:
+        """Generate Gemini-tailored cover letter."""
+        try:
+            logger.debug(f"💌 Generating Gemini-tailored cover letter...")
+            
+            candidate_info = {
+                "name": CANDIDATE_PROFILE.get("first_name", "Shaheryar"),
+                "email": CANDIDATE_PROFILE.get("email", "emailshaheryar@gmail.com"),
+                "phone": CANDIDATE_PROFILE.get("phone", "+923113206213"),
+                "years_exp": CANDIDATE_PROFILE.get("years_of_experience", "3"),
+                "current_company": CANDIDATE_PROFILE.get("current_company", "Pakistan Single Window"),
+                "current_title": CANDIDATE_PROFILE.get("current_title", "Software Engineer"),
+            }
+            
+            result = await self.gemini_service.generate_cover_letter(
+                job.title, job.company, job_description, candidate_info
+            )
+            
+            cover_letter = result.get("cover_letter", "")
+            logger.info(f"✅ Gemini cover letter generated ({len(cover_letter)} chars)")
+            
+            return cover_letter
+        
+        except Exception as e:
+            logger.error(f"   ❌ Gemini cover letter generation failed: {e}")
+            logger.debug(f"   Falling back to template-based cover letter")
+            return self.optimizer.generate_cover_letter(
+                job.title, job.company, job_description
+            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Label helpers

@@ -1,15 +1,15 @@
 """
-LinkedIn Job Agent — Main Orchestrator  (v3)
-=============================================
-Coordinates: Login → Job Search → Resume Optimization → Easy Apply → Logging
+LinkedIn Job Agent — Main Orchestrator (v4 - Gemini-Powered)
+=============================================================
+Coordinates: Login → Job Search → Gemini Analysis → Resume Tailoring → Easy Apply → Review → Logging
 
-FIXES:
-- Replaced wait_until="networkidle" with "domcontentloaded" + explicit settle wait
-  (LinkedIn never goes network-idle due to background polling — caused 30s timeouts)
-- Page recovery: detects dead/crashed page and recreates it without restarting the agent
-- Per-job timeout wrapper: one stuck job can no longer crash the entire session
-- Browser launch hardened with extra anti-detection flags
-- Login handles 2FA prompt wait gracefully
+NEW IN v4:
+- Gemini LLM integration for intelligent form analysis and field mapping
+- AI-powered resume tailoring (light or medium optimization)
+- AI-generated contextual cover letters
+- User review layer for form, resume, and cover letter before submission
+- Aggressive logging with API call tracking
+- Smart form field comparison to skip reviews for identical jobs
 """
 
 import asyncio
@@ -29,22 +29,41 @@ from core.job_scraper import LinkedInJobScraper, JobListing
 from core.easy_apply_handler import EasyApplyHandler
 from core.resume_optimizer import ResumeOptimizer
 from core.tracker import ApplicationTracker
-from core.logger import setup_logger
+from core.enhanced_logger import setup_enhanced_logger
+from core.llm_service import GeminiService
+from core.pdf_generator import PDFGenerator
+from core.pdf_validator import PDFValidator
+from core.review_manager import ReviewManager
 
-logger = setup_logger("agent")
+logger, api_tracker = setup_enhanced_logger("agent")
 
 # Max seconds to spend on a single job before giving up and moving on
-PER_JOB_TIMEOUT = 120
+PER_JOB_TIMEOUT = 180  # Increased to 180s for LLM + PDF generation
 
 
 class LinkedInJobAgent:
-    def __init__(self, config: AgentConfig):
+    def __init__(self, config: AgentConfig, api_tracker=None):
         self.config = config
+        self.api_tracker = api_tracker
         self.tracker = ApplicationTracker(config.output_dir)
         self.optimizer = ResumeOptimizer(config.tailored_resume_dir)
+        self.gemini_service = GeminiService(
+            config.gemini_api_key,
+            api_tracker=api_tracker,
+            max_calls_per_minute=config.max_api_calls_per_minute
+        )
+        self.pdf_generator = PDFGenerator(config.tailored_resume_dir)
+        self.pdf_validator = PDFValidator(max_size_mb=5.0, max_pages=2)
+        self.review_manager = ReviewManager(config.review_dir)
+        
         self.browser: Browser = None
         self.context: BrowserContext = None
         self.page: Page = None
+        self.last_form_data = {}  # Track previous form for comparison
+        
+        logger.debug(f"🤖 Agent initialized with Gemini LLM service")
+        logger.debug(f"   API tracker: {'Active' if api_tracker else 'Inactive'}")
+        logger.debug(f"   Resume optimization: {config.resume_optimization_level}")
 
     async def _delay(self, min_s=None, max_s=None):
         lo = min_s or self.config.min_delay_seconds
