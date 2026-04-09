@@ -173,3 +173,91 @@ Shaheryar Khan"""
         if self.api_tracker:
             return self.api_tracker.get_summary()
         return {"total_calls": self.call_count, "mock": True}
+    
+    async def analyze_button_location_from_screenshot(self, screenshot_path: str) -> Dict:
+        """Mock screenshot analysis for button detection."""
+        self.call_count += 1
+        logger.info(f"🔍 [LLM-MOCK] analyze_button_location_from_screenshot called")
+        logger.info(f"   Screenshot: {screenshot_path}")
+        
+        await asyncio.sleep(0.3)  # Simulate API latency
+        
+        # Mock response indicating button found
+        result = {
+            "found": True,
+            "description": "Blue button labeled 'Easy Apply' located at the top-right of the job detail panel",
+            "selector": "button#jobs-apply-button-id",
+            "coordinates": {
+                "x": 85,
+                "y": 20,
+                "estimated": True
+            },
+            "confidence": 92,
+            "reasoning": "Button text contains 'Easy Apply' and matches known LinkedIn styling"
+        }
+        
+        logger.info(f"   ✅ Mock: Button detected (MOCK RESPONSE)")
+        logger.info(f"   Result: found={result['found']}, selector={result['selector']}, confidence={result['confidence']}%")
+        
+        if self.api_tracker:
+            self.api_tracker.log_call(
+                endpoint="analyze_button_mock",
+                model="gemini-3.1-flash-lite-preview",
+                prompt_summary="analyze_button_location",
+                response_length=200,
+                duration_ms=300
+            )
+        
+        return result
+    
+    async def identify_easy_apply_button(self, buttons_info: list) -> Dict:
+        """Mock button identification from HTML."""
+        self.call_count += 1
+        logger.info(f"🔍 [LLM-MOCK] identify_easy_apply_button called")
+        logger.info(f"   Buttons received: {len(buttons_info)}")
+        
+        await asyncio.sleep(0.2)
+        
+        # Log button preview
+        for i, btn in enumerate(buttons_info[:3]):
+            logger.info(f"      [{i}] text='{btn.get('text', '')[:40]}'")
+        
+        # Look for "Easy Apply" text in buttons
+        for idx, btn in enumerate(buttons_info):
+            text = btn.get("text", "").lower()
+            aria = btn.get("aria_label", "").lower()
+            btn_id = btn.get("id", "").lower()
+            
+            if "easy apply" in text or "easy apply" in aria or "apply" in btn_id:
+                result = {
+                    "found": True,
+                    "button_index": idx,
+                    "selector": f"button#{btn.get('id')}" if btn.get('id') else f"button:nth-child({idx})",
+                    "confidence": 95,
+                    "reasoning": f"Matched 'Easy Apply' text in button {idx}"
+                }
+                
+                logger.info(f"   ✅ Mock: Button identified at index {idx}")
+                logger.info(f"   Result: found={result['found']}, selector={result['selector']}, confidence={result['confidence']}%")
+                
+                if self.api_tracker:
+                    self.api_tracker.log_call(
+                        endpoint="identify_button_mock",
+                        model="gemini-3.1-flash-lite-preview",
+                        prompt_summary="identify_easy_apply_button",
+                        response_length=200,
+                        duration_ms=200
+                    )
+                
+                return result
+        
+        # Not found
+        result = {
+            "found": False,
+            "button_index": -1,
+            "selector": None,
+            "confidence": 0,
+            "reasoning": "No button with 'Easy Apply' text found"
+        }
+        logger.warning(f"   ⚠️  Mock: Easy Apply button not found in provided list")
+        return result

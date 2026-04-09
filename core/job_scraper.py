@@ -39,8 +39,9 @@ def build_linkedin_search_url(keyword: str, location: str, easy_apply: bool = Tr
         "location": location,
         "f_WT": "2",        # Remote
         "f_AL": "true" if easy_apply else "",  # Easy Apply
-        "f_E": "3,4",       # Mid-Senior level (3=Associate, 4=Mid-Senior)
-        "sortBy": "DD",     # Most recent
+        # "f_E": "3,4",       # Mid-Senior level (3=Associate, 4=Mid-Senior)
+        "sortBy": "R",      # Most relevant
+        "f_TPR": "r86400",  # Past 24 hours
     }
     # Remove empty params
     params = {k: v for k, v in params.items() if v}
@@ -84,28 +85,86 @@ class LinkedInJobScraper:
         jobs = []
 
         try:
+            logger.info(f"   📍 URL: {url}")
             await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await self._random_delay(3, 5)
 
-            # Wait for job cards to load
-            await self.page.wait_for_selector(".job-card-container", timeout=15000)
+            # Log page state BEFORE searching for cards
+            page_url = self.page.url
+            page_title = await self.page.title()
+            logger.info(f"   ✓ Page loaded: {page_title}")
+            logger.debug(f"   Current URL: {page_url}")
+            
+            # Get full HTML to diagnose
+            html_content = await self.page.content()
+            logger.debug(f"   Page HTML size: {len(html_content)} bytes")
+            
+            # Check if page contains any job-related keywords
+            if "job" not in html_content.lower():
+                logger.warning(f"   ⚠️  'job' keyword not found in HTML - page may not have loaded properly")
+            if "apply" not in html_content.lower():
+                logger.warning(f"   ⚠️  'apply' keyword not found in HTML")
 
-            # Get all job cards
-            job_cards = await self.page.query_selector_all(".job-card-container")
-            logger.info(f"   Found {len(job_cards)} job cards")
+            # Try multiple selectors for job cards (LinkedIn structure varies)
+            job_card_selectors = [
+                ".job-card-container",                    # Standard
+                "[data-job-id]",                          # Data attribute
+                ".jobs-search-results__list-item",        # Alternative
+                "div[class*='job-card']",                 # Wildcard
+            ]
+            
+            job_cards = []
+            found_selector = None
+            
+            for selector in job_card_selectors:
+                try:
+                    logger.debug(f"   Trying selector: {selector}")
+                    job_cards = await self.page.query_selector_all(selector)
+                    if len(job_cards) > 0:
+                        found_selector = selector
+                        logger.info(f"   ✓ Found {len(job_cards)} cards using: {selector}")
+                        break
+                    else:
+                        logger.debug(f"   - No results with: {selector}")
+                except Exception as e:
+                    logger.debug(f"   - Error with {selector}: {e}")
+                    continue
+            
+            if len(job_cards) == 0:
+                logger.warning(f"   ❌ NO JOB CARDS FOUND on page!")
+                logger.warning(f"   Possible reasons:")
+                logger.warning(f"      - Search returned empty results")
+                logger.warning(f"      - LinkedIn page layout has changed")
+                logger.warning(f"      - Page did not fully load")
+                
+                # Log HTML snippet for debugging
+                if ".job-card-container" in html_content:
+                    logger.debug(f"   ℹ️  HTML contains '.job-card-container' class but selector failed")
+                    idx = html_content.find(".job-card-container")
+                    snippet = html_content[idx:idx+500]
+                    logger.debug(f"   HTML snippet: {snippet}")
+                
+                return []
 
-            for card in job_cards[:15]:  # Max 15 per search combo
+            logger.info(f"   ✓ Found {len(job_cards)} job cards total")
+
+            for idx, card in enumerate(job_cards[:15], 1):  # Max 15 per search combo
                 try:
                     job = await self._extract_job_from_card(card)
-                    if job and job.easy_apply:
+                    if job:
                         jobs.append(job)
-                        logger.info(f"   ✓ {job.title} @ {job.company} [{job.location}]")
+                        easy_apply_status = "✓" if job.easy_apply else "?"
+                        logger.info(f"   [{idx}/{len(job_cards)}] {easy_apply_status} {job.title} @ {job.company}")
+                    else:
+                        logger.debug(f"   [{idx}/{len(job_cards)}] ⊘ Could not extract job data")
                 except Exception as e:
-                    logger.debug(f"   Card extraction error: {e}")
+                    logger.debug(f"   [{idx}/{len(job_cards)}] Error: {e}")
                     continue
 
+            logger.info(f"   📊 Extracted {len(jobs)} jobs from {len(job_cards)} cards")
+
         except Exception as e:
-            logger.error(f"   Search page error for '{keyword}' in '{location}': {e}")
+            logger.error(f"   ❌ Search page error: {e}", exc_info=True)
 
         return jobs
 
@@ -137,10 +196,35 @@ class LinkedInJobScraper:
             location_el = await card.query_selector(".job-card-container__metadata-item")
             location = (await location_el.inner_text()).strip() if location_el else ""
 
-            # Easy Apply badge
-            easy_apply_el = await card.query_selector(".job-card-container__apply-method")
-            easy_apply_text = (await easy_apply_el.inner_text()).strip() if easy_apply_el else ""
-            is_easy_apply = "easy apply" in easy_apply_text.lower()
+            # Easy Apply detection - use stable selectors + aria-labels
+            # Prioritize: ID > data-attribute > aria-label > class-based
+            easy_apply_selectors = [
+                "button#jobs-apply-button-id",                  # Stable ID
+                "button[data-live-test-job-apply-button]",      # Stable data-attribute
+                ".jobs-apply-button--top-card button",          # Container + button
+                "button[aria-label*='Easy Apply']",             # Aria-label
+                ".job-card-container__apply-method",            # Legacy selector
+                "[class*='apply-method']",                      # Broader match
+            ]
+            
+            is_easy_apply = False
+            
+            for selector in easy_apply_selectors:
+                try:
+                    easy_apply_el = await card.query_selector(selector)
+                    if easy_apply_el:
+                        # Check text content
+                        easy_apply_text = (await easy_apply_el.inner_text()).strip() if easy_apply_el else ""
+                        if "easy apply" in easy_apply_text.lower():
+                            is_easy_apply = True
+                            break
+                        # Check aria-label attribute
+                        aria_label = await easy_apply_el.get_attribute("aria-label") or ""
+                        if "easy apply" in aria_label.lower():
+                            is_easy_apply = True
+                            break
+                except Exception:
+                    continue
 
             # Full URL
             full_url = f"https://www.linkedin.com/jobs/view/{job_id}/"

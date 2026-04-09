@@ -231,7 +231,16 @@ class LinkedInJobAgent:
             logger.info(f"\n🎯 Found {len(jobs)} jobs. Starting applications...\n")
 
             # ── Step 3: Apply — each job has its own timeout + recovery ───
-            handler = EasyApplyHandler(self.page, self.config)
+            logger.info(f"🔧 Initializing EasyApplyHandler...")
+            logger.info(f"   Gemini service: {self.gemini_service is not None} ({type(self.gemini_service).__name__ if self.gemini_service else 'None'})")
+            logger.info(f"   Review manager: {self.review_manager is not None}")
+            handler = EasyApplyHandler(
+                self.page, 
+                self.config,
+                gemini_service=self.gemini_service,
+                review_manager=self.review_manager
+            )
+            logger.info(f"✅ EasyApplyHandler initialized with Gemini service")
             applied_count = 0
 
             for i, job in enumerate(jobs, 1):
@@ -294,17 +303,49 @@ class LinkedInJobAgent:
         Process a single job: navigate → fetch JD → apply.
         Isolated so per-job timeout wraps everything cleanly.
         """
-        # Navigate to job page
+        logger.info(f"   📄 Navigating to job page: {job.url}")
         nav_ok = await self._safe_goto(job.url)
         if not nav_ok:
             logger.warning(f"   ⚠️  Could not load job page: {job.url}")
             return False
 
+        # Dump page HTML for diagnostics
+        try:
+            page_title = await self.page.title()
+            logger.debug(f"   Page title: {page_title}")
+            
+            # Check if Easy Apply button is visible
+            easy_apply_btn = await self.page.query_selector("#jobs-apply-button-id")
+            if easy_apply_btn:
+                logger.info(f"   ✓ Easy Apply button IS present on page")
+            else:
+                logger.warning(f"   ⚠️  Easy Apply button NOT found by ID selector")
+            
+            # Get page HTML for diagnostics
+            html = await self.page.content()
+            html_length = len(html)
+            logger.debug(f"   Page HTML length: {html_length} characters")
+            
+            # Log snippet of HTML around Easy Apply button
+            if "jobs-apply-button" in html:
+                idx = html.find("jobs-apply-button")
+                snippet = html[max(0, idx-200):idx+500]
+                logger.debug(f"   Easy Apply button HTML snippet:")
+                logger.debug(f"   {snippet}")
+            else:
+                logger.warning(f"   ⚠️  'jobs-apply-button' not found in HTML")
+                
+        except Exception as e:
+            logger.debug(f"   HTML dump error: {e}")
+
         # Fetch full job description
+        logger.info(f"   📖 Fetching job description...")
         job.description = await scraper.fetch_job_description_from_current_page()
+        logger.debug(f"   Description length: {len(job.description)} characters")
         await self._delay(1, 2)
 
         # Apply
+        logger.info(f"   🎯 Attempting to apply...")
         return await handler.apply_to_job_on_current_page(job, job.description)
 
     # ─────────────────────────────────────────────────────────────────────────

@@ -260,6 +260,54 @@ Make it professional, genuine, and personalized."""
         
         return {"cover_letter": text, "length": len(text)}
     
+    async def analyze_button_location_from_screenshot(self, screenshot_path: str) -> Dict:
+        """
+        Analyze screenshot to find Easy Apply button.
+        REST version requires uploading the image to Files API first.
+        """
+        logger.debug(f"📸 REST: Analyzing screenshot for button (not yet implemented with REST)")
+        
+        # Note: REST API screenshot analysis would require using Files API to upload image first
+        # This is a placeholder - proper implementation would:
+        # 1. Upload image to Files API
+        # 2. Make generateContent request with image reference
+        # For now, return not found to fall back to HTML-based detection
+        return {
+            "found": False,
+            "error": "Screenshot analysis not yet implemented for REST API",
+            "message": "Falling back to HTML-based detection"
+        }
+    
+    async def identify_easy_apply_button(self, buttons_info: List[Dict]) -> Dict:
+        """Identify Easy Apply button from HTML button list using REST API."""
+        logger.debug(f"🔍 REST: Identifying Easy Apply button from {len(buttons_info)} buttons...")
+        
+        # Prepare button list for Gemini
+        buttons_text = "\n".join([
+            f"Button {i}: text='{b.get('text', '')}', aria='{b.get('aria_label', '')}', id='{b.get('id', '')}'"
+            for i, b in enumerate(buttons_info[:20])
+        ])
+        
+        prompt = f"""Identify which button is the LinkedIn Easy Apply button.
+
+BUTTONS:
+{buttons_text}
+
+Look for "Easy Apply" text and return JSON:
+{{"found": true/false, "button_index": <number or -1>, "selector": "...", "confidence": <0-100>}}"""
+        
+        result = await self._make_request("generateContent", prompt)
+        text = await self._extract_response(result)
+        
+        if not text:
+            return {"found": False, "button_index": -1, "confidence": 0, "error": result.get("error")}
+        
+        try:
+            parsed = json.loads(self._extract_json(text))
+            return parsed
+        except:
+            return {"found": False, "button_index": -1, "confidence": 0, "error": "Failed to parse response"}
+    
     def _extract_json(self, text: str) -> str:
         """Extract JSON from text."""
         if "```json" in text:

@@ -81,14 +81,20 @@ YES_NO_ANSWERS = {
 JS_FIND_EASY_APPLY_BUTTON = """
 () => {
     const buttons = Array.from(document.querySelectorAll('button'));
-    return buttons.find(btn => {
+    for (let btn of buttons) {
         const text  = (btn.innerText || '').toLowerCase().trim();
         const aria  = (btn.getAttribute('aria-label') || '').toLowerCase();
-        const isEA  = text.includes('easy apply') || aria.includes('easy apply');
+        const id    = btn.getAttribute('id') || '';
+        const isEA  = text.includes('easy apply') || aria.includes('easy apply') || id === 'jobs-apply-button-id';
         const notDisabled = !btn.disabled;
-        const visible = btn.offsetParent !== null;
-        return isEA && notDisabled && visible;
-    }) || null;
+        // More lenient visibility check - LinkedIn hides buttons in various ways
+        const styles = window.getComputedStyle(btn);
+        const isHidden = styles.display === 'none' || styles.visibility === 'hidden' || styles.opacity === '0';
+        if (isEA && notDisabled && !isHidden) {
+            return btn;
+        }
+    }
+    return null;
 }
 """
 
@@ -142,11 +148,24 @@ class EasyApplyHandler:
         self.gemini_service = gemini_service
         self.review_manager = review_manager
         self.current_job = None  # Track current job for review context
-        logger.debug(f"🔧 EasyApplyHandler initialized")
+        
+        logger.info(f"")
+        logger.info(f"╔═══════════════════════════════════════════════════════════╗")
+        logger.info(f"║ EasyApplyHandler Initialization                          ║")
+        logger.info(f"╚═══════════════════════════════════════════════════════════╝")
+        logger.info(f"🔧 EasyApplyHandler initialized")
+        logger.info(f"   Config: {config}")
+        logger.info(f"   Gemini Service Available: {gemini_service is not None}")
         if gemini_service:
-            logger.debug(f"   ✓ Gemini service available for AI question analysis")
+            logger.info(f"   Gemini Service Type: {type(gemini_service).__name__}")
+            logger.info(f"   ✓ Gemini service ACTIVE for AI button detection")
+        else:
+            logger.warning(f"   ⚠️  NO Gemini service - fallback to JS/CSS only")
+        
         if review_manager:
-            logger.debug(f"   ✓ Review manager available for user approval prompts")
+            logger.info(f"   ✓ Review manager available for user approval prompts")
+        else:
+            logger.warning(f"   ⚠️  NO Review manager")
 
     async def _delay(self, min_s=1.0, max_s=3.5):
         await asyncio.sleep(random.uniform(min_s, max_s))
@@ -167,14 +186,51 @@ class EasyApplyHandler:
         self.current_job = job  # Track for review context
         logger.info(f"📝 Applying: {job.title} @ {job.company}")
         try:
+            # Log current page state
+            current_url = self.page.url
+            page_title = await self.page.title()
+            logger.debug(f"   Current URL: {current_url}")
+            logger.debug(f"   Page title: {page_title}")
+            
+            # Check Easy Apply button BEFORE any clicks
+            logger.info(f"   🔍 Checking for Easy Apply button...")
+            easy_apply_check = await self.page.evaluate("""
+                () => {
+                    const btn = document.getElementById('jobs-apply-button-id');
+                    if (!btn) return { found: false, message: 'ID selector failed' };
+                    const styles = window.getComputedStyle(btn);
+                    return {
+                        found: true,
+                        text: btn.innerText || btn.textContent,
+                        aria: btn.getAttribute('aria-label'),
+                        display: styles.display,
+                        visibility: styles.visibility,
+                        opacity: styles.opacity,
+                        disabled: btn.disabled,
+                        offsetParent: btn.offsetParent !== null
+                    };
+                }
+            """)
+            logger.info(f"   Button check result: {easy_apply_check}")
+            
+            # Wait extra time for LinkedIn to fully load job details and Easy Apply button
+            await self._delay(2, 4)
+            
+            # Scroll to top to ensure job detail panel is visible
+            await self.page.evaluate("window.scrollTo(0, 0)")
+            await self._delay(0.5, 1.0)
+            
+            # Scroll down slowly to reveal buttons
             await self.page.evaluate("window.scrollBy(0, 300)")
             await self._delay(0.5, 1.0)
 
             clicked = await self._click_easy_apply_button()
             if not clicked:
+                logger.error(f"   ❌ FAILED to click Easy Apply button")
                 await self._diagnose_button_failure(job)
                 return False
 
+            logger.info(f"   ✅ Easy Apply button clicked successfully")
             await self._delay(1.5, 3)
 
             # Use Gemini to generate tailored resume if available
@@ -216,66 +272,372 @@ class EasyApplyHandler:
             return False
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Easy Apply button — JS-based detection
+    # Easy Apply button — JS-based detection with LLM fallback
     # ─────────────────────────────────────────────────────────────────────────
     async def _click_easy_apply_button(self) -> bool:
         """
-        Find and click the Easy Apply button using JavaScript DOM walk.
-        Falls back to CSS selectors if JS returns nothing.
-        Retries up to 3 times with increasing waits.
+        Find and click the Easy Apply button using multiple strategies:
+        1. JavaScript DOM walk (immune to class changes)
+        2. CSS selectors (stable identifiers)
+        3. LLM-based visual analysis (Gemini) - NEW!
+        
+        Uses retry mechanism with increasing waits.
         """
-        for attempt in range(3):
+        # Log initial state
+        logger.info(f"   ━━━ EASY APPLY BUTTON DETECTION STARTING ━━━")
+        logger.info(f"   Gemini Service Available: {self.gemini_service is not None}")
+        logger.info(f"   Gemini Service Type: {type(self.gemini_service).__name__ if self.gemini_service else 'None'}")
+        
+        for attempt in range(4):
+            attempt_num = attempt + 1
+            logger.info(f"")
+            logger.info(f"   ╔═══════════════════════════════════════════════════════════╗")
+            logger.info(f"   ║ ATTEMPT {attempt_num}/4 to find Easy Apply button             ║")
+            logger.info(f"   ╚═══════════════════════════════════════════════════════════╝")
+            
             # Method 1: JS walk — immune to class name changes
             try:
+                logger.info(f"   [Method 1/3] Testing JS DOM walk...")
                 btn = await self.page.evaluate_handle(JS_FIND_EASY_APPLY_BUTTON)
+                logger.debug(f"      JS returned: {btn}")
                 if btn:
                     as_el = btn.as_element()
+                    logger.debug(f"      JS element: {as_el}")
                     if as_el:
+                        logger.info(f"      ✓ JS method FOUND button!")
                         await as_el.scroll_into_view_if_needed()
-                        await self._delay(0.3, 0.7)
-                        await as_el.click()
-                        logger.info("   ✅ Easy Apply button clicked (JS method)")
-                        return True
+                        await self._delay(0.5, 1.0)
+                        try:
+                            await as_el.click()
+                            logger.info(f"      ✅ SUCCESS: Button clicked via JS method")
+                            return True
+                        except Exception as click_err:
+                            logger.warning(f"      ⚠️  JS click failed: {click_err}")
+                    else:
+                        logger.debug(f"      JS found handle but could not convert to element")
+                else:
+                    logger.info(f"      ✗ JS returned null/no button found")
             except Exception as e:
-                logger.debug(f"   JS button find error (attempt {attempt+1}): {e}")
+                logger.debug(f"      JS error: {e}")
 
-            # Method 2: CSS selector fallbacks
+            # Method 2: CSS selector fallbacks - prioritize stable identifiers
+            logger.info(f"   [Method 2/3] Testing CSS selectors...")
             css_selectors = [
-                "button.jobs-apply-button--top-card",
-                "button.jobs-apply-button",
-                "button[aria-label*='Easy Apply']",
-                "button[aria-label*='easy apply']",
-                ".jobs-s-apply button",
-                ".jobs-s-apply--top-card button",
-                "button:has-text('Easy Apply')",
-                ".jobs-apply-button",
+                "#jobs-apply-button-id",                           # Stable ID (primary)
+                "button[data-live-test-job-apply-button]",         # Stable data-attribute
+                "button[aria-label*='Easy Apply']",                # Aria-label match
+                "button[aria-label*='easy apply']",                # Case-insensitive
+                ".jobs-apply-button--top-card button",             # Container + button
+                "button.jobs-apply-button",                        # Button with class
             ]
-            for sel in css_selectors:
+            
+            css_found = False
+            for sel_idx, sel in enumerate(css_selectors, 1):
                 try:
+                    logger.debug(f"      [{sel_idx}/6] Testing: {sel}")
                     btn = await self.page.query_selector(sel)
                     if btn:
                         visible = await btn.is_visible()
                         enabled = await btn.is_enabled()
+                        logger.info(f"      ✓ FOUND selector '{sel}'")
+                        logger.info(f"         visible={visible}, enabled={enabled}")
                         if visible and enabled:
                             await btn.scroll_into_view_if_needed()
-                            await self._delay(0.3, 0.6)
+                            await self._delay(0.5, 1.0)
                             await btn.click()
-                            logger.info(f"   ✅ Easy Apply button clicked (CSS: {sel})")
+                            logger.info(f"      ✅ SUCCESS: Button clicked via CSS selector '{sel}'")
                             return True
+                        else:
+                            logger.info(f"      ✗ Button found but NOT usable (visible={visible}, enabled={enabled})")
+                    else:
+                        logger.debug(f"      ✗ Selector returned no element")
                 except Exception as e:
-                    logger.debug(f"   CSS selector '{sel}' error: {e}")
+                    logger.debug(f"      Error with '{sel}': {e}")
                     continue
 
-            # Wait longer before retry
-            wait = [2, 4, 6][attempt]
-            logger.debug(f"   Button not found, waiting {wait}s before retry {attempt+2}...")
-            await asyncio.sleep(wait)
+            if not css_found:
+                logger.info(f"      ✗ All CSS selectors failed")
 
-            # On retry: scroll more and wait for dynamic load
-            await self.page.evaluate("window.scrollBy(0, 400)")
-            await asyncio.sleep(1)
+            # Method 3: LLM-based button detection (NEW!)
+            logger.info(f"   [Method 3/3] LLM-based detection check...")
+            logger.info(f"      Gemini available: {self.gemini_service is not None}")
+            logger.info(f"      Attempt number: {attempt_num} (need >= 3)")
+            logger.info(f"      Should use LLM: {self.gemini_service is not None and attempt_num >= 3}")
+            
+            if self.gemini_service and attempt_num >= 3:  # Try LLM on 3rd+ attempts
+                logger.info(f"      🤖 INVOKING LLM-based button detection...")
+                llm_result = await self._click_easy_apply_button_with_llm()
+                logger.info(f"      LLM result: {llm_result}")
+                if llm_result:
+                    return True
+            else:
+                if self.gemini_service is None:
+                    logger.debug(f"      ⊘ Skipping LLM: No Gemini service available")
+                else:
+                    logger.debug(f"      ⊘ Skipping LLM: Not yet attempt 3+ (current: {attempt_num})")
+            
+            # Retry with increasingly longer waits
+            wait_times = [3, 5, 8, 10]
+            if attempt_num < 4:
+                wait_sec = wait_times[attempt]
+                logger.warning(f"")
+                logger.warning(f"   ⏳ RETRY WAIT: {wait_sec}s before attempt {attempt_num+1}/4...")
+                await self._delay(wait_sec, wait_sec + 2)
+
+                # On retry: aggressive scroll and re-evaluate page state
+                logger.debug(f"   Scrolling page to refresh button visibility...")
+                await self.page.evaluate("window.scrollBy(0, 500)")
+                await self._delay(1.0, 1.5)
+            else:
+                logger.error(f"")
+                logger.error(f"   ╔═══════════════════════════════════════════════════════════╗")
+                logger.error(f"   ║ ❌ MAX RETRIES REACHED — BUTTON NOT FOUND AFTER 4 ATTEMPTS ║")
+                logger.error(f"   ╚═══════════════════════════════════════════════════════════╝")
 
         return False
+
+    async def _click_easy_apply_button_with_llm(self) -> bool:
+        """
+        Use Gemini to analyze page screenshot and identify Easy Apply button location.
+        Attempts two approaches:
+        1. Screenshot-based: Send page screenshot to Gemini for visual button detection
+        2. HTML-based: Get all button HTML and ask Gemini which is the Easy Apply button
+        """
+        try:
+            logger.info(f"      ┌───────────────────────────────────────────────────┐")
+            logger.info(f"      │ LLM BUTTON DETECTION ORCHESTRATOR                 │")
+            logger.info(f"      └───────────────────────────────────────────────────┘")
+            logger.info(f"      Starting LLM button detection with Gemini service...")
+            logger.info(f"      Gemini type: {type(self.gemini_service).__name__}")
+            
+            # Approach 1: Try screenshot-based detection
+            logger.info(f"      ")
+            logger.info(f"      [Approach 1/2] Screenshot-based detection")
+            logger.info(f"      ──────────────────────────────────────────")
+            screenshot_result = await self._click_button_from_screenshot()
+            logger.info(f"      Screenshot approach result: {screenshot_result}")
+            if screenshot_result:
+                logger.info(f"      ✅ Screenshot approach SUCCEEDED")
+                return True
+            logger.info(f"      ✗ Screenshot approach failed, trying next...")
+            
+            logger.info(f"      ")
+            logger.info(f"      [Approach 2/2] HTML-based detection")
+            logger.info(f"      ──────────────────────────────────────────")
+            html_result = await self._click_button_from_html()
+            logger.info(f"      HTML-based approach result: {html_result}")
+            if html_result:
+                logger.info(f"      ✅ HTML-based approach SUCCEEDED")
+                return True
+            
+            logger.warning(f"      ")
+            logger.warning(f"      ⚠️  Both LLM approaches FAILED")
+            return False
+        
+        except Exception as e:
+            logger.error(f"      Exception in LLM orchestrator: {e}")
+            logger.error(f"      Exception type: {type(e).__name__}")
+            logger.error(f"      Gemini service: {self.gemini_service}")
+            logger.error(f"      Gemini service type: {type(self.gemini_service).__name__ if self.gemini_service else 'None'}")
+            import traceback
+            logger.error(f"      Traceback: {traceback.format_exc()}")
+            return False
+
+    async def _click_button_from_screenshot(self) -> bool:
+        """
+        Take a screenshot of the page and ask Gemini to identify Easy Apply button location.
+        """
+        try:
+            logger.info(f"         Initializing screenshot-based detection...")
+            
+            # Take screenshot
+            screenshot_path = "/tmp/linkedin_button_detection.png"
+            logger.info(f"         📸 Capturing screenshot to: {screenshot_path}")
+            
+            await self.page.screenshot(path=screenshot_path)
+            logger.info(f"         ✓ Screenshot captured")
+            logger.info(f"         🔍 Gemini service type: {type(self.gemini_service).__name__ if self.gemini_service else 'None'}")
+            
+            # Verify file exists
+            if not os.path.exists(screenshot_path):
+                logger.warning(f"         ⚠️  Screenshot file was not created!")
+                return False
+            
+            file_size = os.path.getsize(screenshot_path)
+            logger.info(f"         Screenshot file size: {file_size} bytes")
+            
+            if file_size == 0:
+                logger.warning(f"         ⚠️  Screenshot file is empty!")
+                return False
+            
+            # Call Gemini service to analyze screenshot
+            logger.info(f"         Sending screenshot to Gemini for analysis...")
+            logger.info(f"         Gemini method: analyze_button_location_from_screenshot")
+            
+            result = await self.gemini_service.analyze_button_location_from_screenshot(
+                screenshot_path
+            )
+            
+            logger.info(f"         Gemini response received:")
+            logger.info(f"            Response: {result}")
+            
+            if not result:
+                logger.warning(f"         ⚠️  Gemini returned None/empty response")
+                return False
+            
+            if not result.get("found"):
+                logger.info(f"         Button not detected in screenshot")
+                logger.debug(f"         Response details: {result}")
+                return False
+            
+            logger.info(f"         ✅ Gemini detected button in screenshot!")
+            
+            # Try to click based on Gemini's analysis
+            button_info = result.get("button_info", {})
+            logger.info(f"         Button info from Gemini: {button_info}")
+            
+            # Approach: Get selector or coordinates from Gemini response
+            selector = button_info.get("selector")
+            if selector:
+                logger.info(f"         Attempting to click using selector: {selector}")
+                btn = await self.page.query_selector(selector)
+                if btn:
+                    logger.info(f"         ✓ Selector found element")
+                    await btn.scroll_into_view_if_needed()
+                    await self._delay(0.5, 1.0)
+                    await btn.click()
+                    logger.info(f"         ✅ Button clicked successfully via Gemini-provided selector")
+                    return True
+                else:
+                    logger.warning(f"         ⚠️  Selector did not find element on page")
+            
+            # Alternative: Try clicking by coordinates
+            coords = button_info.get("coordinates")
+            if coords and "x" in coords and "y" in coords:
+                logger.info(f"         Attempting to click using coordinates: x={coords['x']}, y={coords['y']}")
+                try:
+                    x, y = coords["x"], coords["y"]
+                    await self.page.click(f"button[x='{x}'][y='{y}']", timeout=3000)
+                    logger.info(f"         ✅ Button clicked successfully via coordinates")
+                    return True
+                except Exception as coord_err:
+                    logger.warning(f"         ⚠️  Coordinate click failed: {coord_err}")
+            
+            logger.warning(f"         ⚠️  Could not extract/use button information from Gemini")
+            return False
+        
+        except Exception as e:
+            logger.error(f"         Exception in screenshot-based detection: {e}")
+            logger.error(f"         Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"         Traceback: {traceback.format_exc()}")
+            return False
+
+    async def _click_button_from_html(self) -> bool:
+        """
+        Get all button elements as HTML and ask Gemini to identify which is Easy Apply.
+        Then find and click that button.
+        """
+        try:
+            logger.info(f"         Initializing HTML-based detection...")
+            logger.info(f"         Collecting all buttons from page...")
+            
+            # Get all buttons with their properties
+            buttons_info = await self.page.evaluate("""
+                () => Array.from(document.querySelectorAll('button'))
+                    .slice(0, 50)  // Limit to first 50 buttons
+                    .map((btn, idx) => ({
+                        index: idx,
+                        text: btn.innerText.trim().slice(0, 100),
+                        aria_label: btn.getAttribute('aria-label') || '',
+                        id: btn.getAttribute('id') || '',
+                        class: btn.getAttribute('class') || '',
+                        data_test: btn.getAttribute('data-test-id') || '',
+                        type: btn.getAttribute('type') || 'button',
+                        disabled: btn.disabled,
+                        visible: btn.offsetParent !== null,
+                        html: btn.outerHTML.slice(0, 300)
+                    }))
+            """)
+            
+            logger.info(f"         Found {len(buttons_info)} buttons on page")
+            
+            if len(buttons_info) == 0:
+                logger.warning(f"         ⚠️  No buttons found on page!")
+                return False
+            
+            # Log button summary
+            logger.debug(f"         Button summary:")
+            for i, btn in enumerate(buttons_info[:10]):  # Log first 10
+                logger.debug(f"           [{i}] text='{btn.get('text', '')[:40]}' aria='{btn.get('aria_label', '')[:40]}'")
+            
+            # Call Gemini to identify which button is Easy Apply
+            logger.info(f"         Sending {len(buttons_info)} buttons to Gemini for analysis...")
+            logger.info(f"         Gemini method: identify_easy_apply_button")
+            
+            result = await self.gemini_service.identify_easy_apply_button(
+                buttons_info
+            )
+            
+            logger.info(f"         Gemini response received:")
+            logger.info(f"            Response type: {type(result)}")
+            logger.info(f"            Response keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+            logger.info(f"            Full Response: {result}")
+            
+            if not result or not result.get("found"):
+                logger.info(f"         Gemini could not identify Easy Apply button")
+                logger.debug(f"         Response details: {result}")
+                return False
+            
+            logger.info(f"         ✅ Gemini identified Easy Apply button!")
+            
+            button_index = result.get("button_index")
+            button_selector = result.get("selector")
+            confidence = result.get("confidence", 0)
+            
+            logger.info(f"         Button index: {button_index}")
+            logger.info(f"         Selector: {button_selector}")
+            logger.info(f"         Confidence: {confidence}%")
+            
+            # Try to click using the selector
+            if button_selector:
+                logger.info(f"         Attempting to click using Gemini-recommended selector...")
+                btn = await self.page.query_selector(button_selector)
+                if btn and await btn.is_visible():
+                    logger.info(f"         ✓ Selector found visible element")
+                    await btn.scroll_into_view_if_needed()
+                    await self._delay(0.5, 1.0)
+                    await btn.click()
+                    logger.info(f"         ✅ Button clicked successfully via Gemini-recommended selector")
+                    return True
+                else:
+                    logger.warning(f"         ⚠️  Selector: element not found or not visible")
+            
+            # Fallback: Click by index
+            if button_index is not None and button_index >= 0:
+                logger.info(f"         Fallback: Attempting to click button at index {button_index}...")
+                all_buttons = await self.page.query_selector_all("button")
+                logger.info(f"         Total buttons on page: {len(all_buttons)}")
+                
+                if button_index < len(all_buttons):
+                    target_btn = all_buttons[button_index]
+                    logger.info(f"         ✓ Index {button_index} is valid")
+                    await target_btn.scroll_into_view_if_needed()
+                    await self._delay(0.5, 1.0)
+                    await target_btn.click()
+                    logger.info(f"         ✅ Button clicked successfully via index {button_index}")
+                    return True
+                else:
+                    logger.warning(f"         ⚠️  Index {button_index} out of range (max: {len(all_buttons)-1})")
+            
+            logger.warning(f"         ⚠️  Could not click button using provided strategies")
+            return False
+        
+        except Exception as e:
+            logger.error(f"         Exception in HTML-based detection: {e}")
+            import traceback
+            logger.error(f"         Traceback: {traceback.format_exc()}")
+            return False
 
     # ─────────────────────────────────────────────────────────────────────────
     # Multi-step form walker
@@ -708,8 +1070,16 @@ class EasyApplyHandler:
 
             # Check if redirected to login
             if "login" in url or "authwall" in url or "checkpoint" in url:
-                logger.error("   ❌ Session expired — redirected to login!")
+                logger.error("   ❌ SESSION EXPIRED — redirected to login page!")
+                job.apply_status = "session_expired"
                 return
+
+            # Check for specific button with ID
+            id_button = await self.page.query_selector("#jobs-apply-button-id")
+            if id_button:
+                logger.debug(f"   ID button found but failed click")
+                styles = await self.page.evaluate("() => window.getComputedStyle(document.getElementById('jobs-apply-button-id'))")
+                logger.debug(f"   Button styles: display={styles.get('display')}, visibility={styles.get('visibility')}")
 
             # List all buttons on page for debugging
             buttons = await self.page.evaluate("""
@@ -717,18 +1087,27 @@ class EasyApplyHandler:
                     .map(b => ({
                         text: b.innerText.trim().slice(0,60),
                         aria: b.getAttribute('aria-label') || '',
+                        id: b.getAttribute('id') || '',
                         disabled: b.disabled,
-                        visible: b.offsetParent !== null
+                        display: window.getComputedStyle(b).display,
+                        visibility: window.getComputedStyle(b).visibility,
+                        offsetParent: b.offsetParent !== null
                     }))
-                    .filter(b => b.text || b.aria)
-                    .slice(0, 15)
+                    .filter(b => b.text.toLowerCase().includes('apply') || b.aria.toLowerCase().includes('apply'))
+                    .slice(0, 10)
             """)
-            logger.debug(f"   Buttons on page: {buttons}")
+            if buttons:
+                logger.warning(f"   Found {len(buttons)} apply-related buttons:")
+                for btn in buttons:
+                    logger.warning(f"      - Text: '{btn['text'][:40]}' | Type: {btn['display']} | Visible: {btn['offsetParent']}")
+            else:
+                logger.warning(f"   ❌ NO apply-related buttons found on page!")
 
             # Check if it's an external application (not Easy Apply)
             apply_link = await self.page.query_selector("a[href*='apply']")
             if apply_link:
                 href = await apply_link.get_attribute("href")
-                logger.warning(f"   This may be an external application (not Easy Apply): {href}")
+                logger.warning(f"   ℹ️  External application link found: {href[:80]}")
+                job.apply_status = "external_application"
         except Exception as e:
             logger.debug(f"   Diagnostics error: {e}")

@@ -368,11 +368,10 @@ CANDIDATE PROFILE:
 - Name: {candidate_info.get('name', 'Shaheryar Khan')}
 - Email: {candidate_info.get('email', 'emailshaheryar@gmail.com')}
 - Phone: {candidate_info.get('phone', '+923113206213')}
-- Years of Experience: {candidate_info.get('years_exp', '3')}
 - Technologies: C#, .NET Core, SQL Server, RabbitMQ, Azure, Microservices, REST APIs
 - Current Company: {candidate_info.get('current_company', 'Pakistan Single Window')}
 - Current Title: {candidate_info.get('current_title', 'Software Engineer')}
-- Location: Pakistan (Remote preferred)
+- Location: United States (Remote preferred)
 - Key Achievement: Architected microservices for 100K+ users
 
 REQUIREMENTS:
@@ -417,6 +416,220 @@ Return ONLY the cover letter text, no additional formatting or explanation."""
             if self.api_tracker:
                 self.api_tracker.log_error("api_error", str(e), "generate_cover_letter")
             return {"cover_letter": "", "error": str(e)}
+    
+    async def analyze_button_location_from_screenshot(self, screenshot_path: str) -> Dict:
+        """
+        Analyze a screenshot to identify the Easy Apply button location.
+        
+        Args:
+            screenshot_path: Path to the screenshot file
+        
+        Returns:
+            Dict with button location info and selector/coordinates
+        """
+        logger.info(f"🔍 [LLM-GEMINI] analyze_button_location_from_screenshot called")
+        logger.info(f"   Screenshot path: {screenshot_path}")
+        
+        try:
+            # Check if file exists
+            import os
+            if not os.path.exists(screenshot_path):
+                logger.error(f"❌ Screenshot file not found: {screenshot_path}")
+                return {"found": False, "error": "File not found"}
+            
+            file_size = os.path.getsize(screenshot_path)
+            logger.info(f"   File size: {file_size} bytes")
+            
+            await self._enforce_rate_limit()
+            
+            # Read screenshot as binary
+            with open(screenshot_path, "rb") as f:
+                screenshot_data = f.read()
+            
+            logger.info(f"   Read {len(screenshot_data)} bytes from file")
+            
+            prompt = """You are an expert at identifying UI elements in screenshots.
+
+TASK: Analyze this LinkedIn job page screenshot and identify the "Easy Apply" button.
+
+INSTRUCTIONS:
+1. Look for a button with text containing "Easy Apply"
+2. Describe its location on the page (top, right, blue color, etc.)
+3. Provide a CSS selector that might work to locate it
+4. If you can estimate coordinates, provide them as percentages (0-100) or pixels
+5. Assess confidence in finding the button (0-100%)
+
+Return ONLY valid JSON:
+{
+  "found": true/false,
+  "description": "Location and appearance of the button...",
+  "selector": "CSS selector to find the button (e.g., 'button.apply-btn')",
+  "coordinates": {
+    "x": pixel_x_or_percentage,
+    "y": pixel_y_or_percentage,
+    "estimated": true/false
+  },
+  "confidence": 85,
+  "reasoning": "Why you think this is the Easy Apply button..."
+}"""
+            
+            start_time = time.time()
+            logger.info(f"   🔄 Calling Gemini API with screenshot Vision support...")
+            logger.info(f"   Model: {self.model}")
+            
+            model = genai.GenerativeModel(self.model)
+            
+            # Use Vision API with the screenshot
+            logger.info(f"   Sending screenshot to Gemini with prompt...")
+            response = model.generate_content([
+                prompt,
+                {
+                    "mime_type": "image/png",
+                    "data": screenshot_data
+                }
+            ])
+            
+            duration = (time.time() - start_time) * 1000
+            response_text = response.text
+            
+            logger.info(f"   ✅ API Response received in {duration:.0f}ms")
+            logger.info(f"   Response length: {len(response_text)} chars")
+            logger.debug(f"   Response text: {response_text[:500]}")
+            
+            if self.api_tracker:
+                self.api_tracker.log_call(
+                    endpoint="generateContent (vision)",
+                    model=self.model,
+                    prompt_summary="analyze_button_location",
+                    response_length=len(response_text),
+                    duration_ms=duration
+                )
+            
+            result = self._extract_json(response_text)
+            logger.info(f"   Parsed JSON result:")
+            logger.info(f"      found: {result.get('found')}")
+            logger.info(f"      confidence: {result.get('confidence', 0)}%")
+            logger.info(f"      selector: {result.get('selector', 'N/A')}")
+            
+            if result.get("found"):
+                logger.info(f"   ✅ Button detected!")
+            else:
+                logger.warning(f"   ⚠️  Button not detected in screenshot")
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"   ❌ Exception in analyze_button_location_from_screenshot: {e}")
+            import traceback
+            logger.error(f"   Traceback: {traceback.format_exc()}")
+            if self.api_tracker:
+                self.api_tracker.log_error("screenshot_analysis_error", str(e), "analyze_button_location")
+            return {"found": False, "error": str(e)}
+    
+    async def identify_easy_apply_button(self, buttons_info: List[Dict]) -> Dict:
+        """
+        Analyze button HTML elements and identify which is the Easy Apply button.
+        
+        Args:
+            buttons_info: List of button dictionaries with text, aria-label, id, etc.
+        
+        Returns:
+            Dict with button index, selector, and confidence
+        """
+        logger.info(f"🔍 [LLM-GEMINI] identify_easy_apply_button called")
+        logger.info(f"   Analyzing {len(buttons_info)} buttons...")
+        
+        await self._enforce_rate_limit()
+        
+        # Prepare button list for Gemini
+        buttons_text = "\n".join([
+            f"Button {i}: text='{b.get('text', '')}', aria='{b.get('aria_label', '')}', id='{b.get('id', '')}', class='{b.get('class', '')[:100]}'"
+            for i, b in enumerate(buttons_info[:20])  # Limit to first 20
+        ])
+        
+        logger.info(f"   Button list preview:")
+        for i, b in enumerate(buttons_info[:5]):
+            logger.info(f"      [{i}] text='{b.get('text', '')[:50]}'")
+        
+        prompt = f"""You are an expert at identifying UI buttons.
+
+TASK: Identify which button is the LinkedIn "Easy Apply" button.
+
+BUTTONS ON PAGE:
+{buttons_text}
+
+ANALYSIS RULES:
+1. Look for text containing "apply" (case-insensitive)
+2. Specifically look for "easy apply" in text or aria-label
+3. Consider button styling, ID, and data attributes
+4. Easy Apply buttons typically have:
+   - Text: "Easy Apply", "easy apply button"
+   - Aria labels mentioning "apply"
+   - IDs containing "apply"
+
+RETURN: JSON with:
+- button_index: which button number (0-based, or -1 if not found)
+- selector: CSS selector to locate it (e.g., "button#jobs-apply-button-id")
+- confidence: 0-100 confidence score
+- reasoning: why this is the Easy Apply button
+
+If not found, return {{"found": false, "button_index": -1, "confidence": 0}}
+
+Return ONLY valid JSON:
+{{
+  "found": true/false,
+  "button_index": <number or -1>,
+  "selector": "CSS selector...",
+  "confidence": <0-100>,
+  "reasoning": "..."
+}}"""
+        
+        try:
+            start_time = time.time()
+            logger.info(f"   🔄 Calling Gemini API for button identification...")
+            logger.info(f"   Model: {self.model}")
+            logger.info(f"   Sending {len(buttons_info)} buttons to Gemini...")
+            
+            model = genai.GenerativeModel(self.model)
+            response = model.generate_content(prompt)
+            
+            duration = (time.time() - start_time) * 1000
+            response_text = response.text
+            
+            logger.info(f"   ✅ API Response received in {duration:.0f}ms")
+            logger.info(f"   Response length: {len(response_text)} chars")
+            logger.debug(f"   Response text: {response_text[:500]}")
+            
+            if self.api_tracker:
+                self.api_tracker.log_call(
+                    endpoint="generateContent",
+                    model=self.model,
+                    prompt_summary="identify_easy_apply_button",
+                    response_length=len(response_text),
+                    duration_ms=duration
+                )
+            
+            result = self._extract_json(response_text)
+            logger.info(f"   Parsed JSON result:")
+            logger.info(f"      found: {result.get('found')}")
+            logger.info(f"      button_index: {result.get('button_index', -1)}")
+            logger.info(f"      selector: {result.get('selector', 'N/A')}")
+            logger.info(f"      confidence: {result.get('confidence', 0)}%")
+            
+            if result.get("found"):
+                logger.info(f"   ✅ Button identified at index {result.get('button_index')}")
+            else:
+                logger.warning(f"   ⚠️  Could not identify Easy Apply button")
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"   ❌ Exception in identify_easy_apply_button: {e}")
+            import traceback
+            logger.error(f"   Traceback: {traceback.format_exc()}")
+            if self.api_tracker:
+                self.api_tracker.log_error("button_identification_error", str(e), "identify_easy_apply_button")
+            return {"found": False, "button_index": -1, "confidence": 0, "error": str(e)}
     
     def _extract_json(self, text: str) -> Dict:
         """Extract JSON from Gemini response (handles markdown code blocks)."""

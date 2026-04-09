@@ -61,7 +61,7 @@ async def main():
         candidate_email="emailshaheryar@gmail.com",
         candidate_phone="+923113206213",
         candidate_linkedin="linkedin.com/in/shaheryarkhan28",
-        target_locations=["Pakistan"],
+        target_locations=["United States"],
         search_keywords=[
             ".NET Developer",
             ".NET Core Developer",

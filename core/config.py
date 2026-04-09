@@ -22,7 +22,7 @@ class AgentConfig:
     resume_path: str = "resumes/ShaheryarKhan_Resume.pdf"
 
     # Search parameters
-    target_locations: List[str] = field(default_factory=lambda: ["Pakistan"])
+    target_locations: List[str] = field(default_factory=lambda: ["United States"])
     search_keywords: List[str] = field(default_factory=lambda: [".NET Developer"])
     job_type: str = "remote"
     easy_apply_only: bool = True
